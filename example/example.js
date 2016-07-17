@@ -29,7 +29,10 @@ var validCodeConfig = {
     path: "./worker-example"
 };
 
-var validCallbacks = {};
+var validCallbacks = {
+    getJob: getJob,
+    receiveResult: receiveResult,
+};
 
 var validOptions = {
     concurrency: 1
@@ -37,3 +40,16 @@ var validOptions = {
 
 var server = new GoFastServer(validWorkerConfig, validCodeConfig, validCallbacks, validOptions);
 server.init();
+
+var i = 0;
+function getJob(done) {
+    // console.log ("getJob");
+    this.log.info ("getJob");
+    i++;
+    if (i > 3) done (null);
+    else done ("job " + i);
+}
+
+function receiveResult(result) {
+    // console.log ("receiveResult");
+}

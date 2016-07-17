@@ -88,6 +88,21 @@ function GoFastServer(workerConfig, codeConfig, callbacks, options) {
     this.test = true;
 }
 
+GoFastServer.prototype._doRawLog = function(str) {
+    var strs = str.split("\n");
+    var i;
+
+    for (i = 0; i < strs.length; i++) {
+        str = strs[i];
+        if (/^{.+}$/m.test(str)) {
+            // console.log ("Got data: \"%s\"", str);
+            try {
+                log._emit (JSON.parse (str));
+            } catch(err){}
+        }
+    }
+};
+
 GoFastServer.prototype.init = function() {
     // start logging service
     this._logInit();
@@ -98,14 +113,21 @@ GoFastServer.prototype.init = function() {
     // if debugging, wait a few seconds and start the worker locally, and don't do the rest of the stuff below
     if (this.test) {
         var path = this.workerProjectPath;
+        var rawLog = this._doRawLog.bind(this);
 
         log.warn ("!!! RUNNING IN DEBUG MODE -- EXECUTING LOCAL WORKER");
         setTimeout(function() {
             // package up the worker project using npm
-            var exec = require("child_process").execSync;
-            exec("npm start", {
+            var exec = require("child_process").exec;
+            var child = exec("npm start", {
                 cwd: path,
-                stdio: ["inherit", "inherit", "inherit"]
+                stdio: ["ignore", "inherit", "inherit"]
+            });
+            child.stdout.on('data', function(data) {
+                rawLog (data);
+            });
+            child.stderr.on('data', function(data) {
+                rawLog (data);
             });
         }, 2000);
         return;
@@ -174,13 +196,13 @@ GoFastServer.prototype._commInit = function() {
 
     // create REST endpoints
     // /log for workers posting log messages
-    server.post("/log", this._restLog);
+    server.post("/log", this._restLog.bind(this));
 
     // /job for workers getting jobs
-    server.get("/job", this._restJob);
+    server.get("/job", this._restJob.bind(this));
 
     // /result for workers posting job results
-    server.post("/results", this._restResult);
+    server.post("/results", this._restResult.bind(this));
 
     // start server
     server.listen(serverPort, function() { // TODO: use port: 0xFA57 ?
@@ -190,14 +212,22 @@ GoFastServer.prototype._commInit = function() {
 
 GoFastServer.prototype._restLog = function(req, res, next) {
     log.info("worker log");
+    // this._doRawLog (req.body);
 };
 
 GoFastServer.prototype._restJob = function(req, res, next) {
+    var workerShutdown = this.workerShutdown;
     log.info("worker job");
+    // TODO: getJob should handle returned values and promises too...
     this.getJob(function(job) {
         res.json({
             job: job
         });
+
+        if (job === null) {
+            log.debug (req.connection);
+            workerShutdown();
+        }
         next();
     });
 };
@@ -213,7 +243,7 @@ GoFastServer.prototype.buildWorkerImage = function() {
     // package up the worker project using npm
     var exec = require("child_process").execSync;
     exec("npm pack " + path, {
-        stdio: ["inherit", "inherit", "inherit"]
+        stdio: "inerhit"
     });
 
     var p = require("path");
