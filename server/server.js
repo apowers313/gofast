@@ -1,11 +1,14 @@
 var fs = require("fs");
+var util = require("util");
 var bunyan = require("bunyan");
 var restify = require("restify");
-var scpClient = require("scp2");
+var ip = require("ip");
 var log, server;
 
 // config
 var serverPort = 8080;
+var npmStartCmd = "npm start -- server:%s:%s";
+var serverStartupDelay = 60000;
 
 function GoFastServer(workerConfig, codeConfig, callbacks, options) {
     if (typeof workerConfig !== "object" || typeof codeConfig !== "object" || typeof callbacks !== "object") {
@@ -81,11 +84,13 @@ function GoFastServer(workerConfig, codeConfig, callbacks, options) {
     this.logfile = options.logfile || "./gofast.log";
     this.verbose = options.verbose || true; // TODO: make this false before publishing
     this.proxy = (options.proxy !== false);
+    this.serverIpAddress = ip.address();
     if (typeof options.concurrency !== "number" && typeof options.concurrency !== "undefined") {
         throw new Error("expected options.concurrency to be the number of workers to start");
     }
     this.workerConcurrency = options.concurrency || 10;
-    this.test = true;
+    this.test = options.test;
+    this.testVerbose = options.testVerbose;
 }
 
 GoFastServer.prototype._doRawLog = function(str) {
@@ -97,13 +102,14 @@ GoFastServer.prototype._doRawLog = function(str) {
         if (/^{.+}$/m.test(str)) {
             // console.log ("Got data: \"%s\"", str);
             try {
-                log._emit (JSON.parse (str));
-            } catch(err){}
+                log._emit(JSON.parse(str));
+            } catch (err) {}
         }
     }
 };
 
 GoFastServer.prototype.init = function() {
+    var self = this;
     // start logging service
     this._logInit();
 
@@ -114,44 +120,62 @@ GoFastServer.prototype.init = function() {
     if (this.test) {
         var path = this.workerProjectPath;
         var rawLog = this._doRawLog.bind(this);
+        var testVerbose = this.testVerbose;
+        var serverIpAddress = this.serverIpAddress;
 
-        log.warn ("!!! RUNNING IN DEBUG MODE -- EXECUTING LOCAL WORKER");
+        log.warn("!!! RUNNING IN DEBUG MODE -- EXECUTING LOCAL WORKER");
         setTimeout(function() {
             // package up the worker project using npm
             var exec = require("child_process").exec;
-            var child = exec("npm start", {
+            var cmd = util.format(npmStartCmd, serverIpAddress, serverPort);
+            log.info("Starting with cmd:", cmd);
+            var child = exec(cmd, {
                 cwd: path,
                 stdio: ["ignore", "inherit", "inherit"]
             });
-            child.stdout.on('data', function(data) {
-                rawLog (data);
-            });
-            child.stderr.on('data', function(data) {
-                rawLog (data);
-            });
+            if (testVerbose) {
+                child.stdout.on('data', function(data) {
+                    console.log("stdout: \"%s\"", data);
+                    rawLog(data);
+                });
+                child.stderr.on('data', function(data) {
+                    console.log("stderr: \"%s\"", data);
+                    rawLog(data);
+                });
+            }
         }, 2000);
         return;
     }
 
     // start proxy server
+    var proxyPromise;
     if (this.proxy) {
-        self._sshReverseTunnel(server)
-            .then(function() {
+        proxyPromise = this._sshReverseTunnel()
+            .then(function(server) {
                 log.info("Reverse tunnel done");
-                this.localIp = "159.203.253.248"; // TODO
+                self.proxyServer = server;
+                this.serverIpAddress = server.networks.v4[0].ip_address;
+                return server;
             })
             .catch(function(err) {
                 log.error(err);
             });
     } else {
-        this.localIp = "???"; // TODO
+        proxyPromise = Promise.resolve();
     }
 
     // build image
     this.buildWorkerImage();
 
     // start workers
-    this._startWorkers();
+    proxyPromise
+        .then(function() {
+            log.info("Starting workers");
+            self._startWorkers();
+        })
+        .catch(function(err) {
+            log.error(err);
+        });
 };
 
 GoFastServer.prototype._logInit = function() {
@@ -181,7 +205,6 @@ GoFastServer.prototype._logInit = function() {
 };
 
 GoFastServer.prototype._commInit = function() {
-    console.log("Starting communications...");
     // create REST server
     log.info("Initializing REST server...");
     server = this.server = restify.createServer({
@@ -211,13 +234,12 @@ GoFastServer.prototype._commInit = function() {
 };
 
 GoFastServer.prototype._restLog = function(req, res, next) {
-    log.info("worker log");
-    // this._doRawLog (req.body);
+    // log.debug ("\"" + req.body + "\"");
+    this._doRawLog(req.body);
 };
 
 GoFastServer.prototype._restJob = function(req, res, next) {
     var workerShutdown = this.workerShutdown;
-    log.info("worker job");
     // TODO: getJob should handle returned values and promises too...
     this.getJob(function(job) {
         res.json({
@@ -225,7 +247,7 @@ GoFastServer.prototype._restJob = function(req, res, next) {
         });
 
         if (job === null) {
-            log.debug (req.connection);
+            log.debug(req.connection.remoteAddress);
             workerShutdown();
         }
         next();
@@ -238,12 +260,11 @@ GoFastServer.prototype._restResult = function(req, res, next) {
 
 GoFastServer.prototype.buildWorkerImage = function() {
     var path = this.workerProjectPath;
-    console.log("path:", path);
 
     // package up the worker project using npm
     var exec = require("child_process").execSync;
     exec("npm pack " + path, {
-        stdio: "inerhit"
+        stdio: "inherit"
     });
 
     var p = require("path");
@@ -252,6 +273,7 @@ GoFastServer.prototype.buildWorkerImage = function() {
     var pkgFile = pkg.name + "-" + pkg.version + ".tgz";
     log.info("Created NPM Package: %s, Version: %s (%s)", pkg.name, pkg.version, pkgFile);
     this.workerPackage = pkgFile;
+    this.workerModuleName = pkg.name;
 
     // var npm = require("npm");
     // npm.load(function(err) {
@@ -266,26 +288,16 @@ GoFastServer.prototype.buildWorkerImage = function() {
     // });
 };
 
-GoFastServer.prototype._startWorkers = function() {
-    var self = this;
-
-    // self.workerSetup.call(self, server, function(err) {
-    //     if (err) {
-    //         log.error(err);
-    //         throw new Error(err);
-    //     }
-    //     self.workerStart.call(self, server, function(err) {
-    //         if (err) {
-    //             log.error(err);
-    //             throw new Error(err);
-    //         }
-    //     });
-    // });
-
+GoFastServer.prototype._startServer = function(options) {
+    options = options || {};
+    var name = options.name || "gofast-server";
+    var number = options.number;
+    if (typeof number === "number") name = name + ('000' + number).slice(-3);
     var digitalocean = require("digitalocean");
     var client = digitalocean.client(this.pkgcloudConfig.client.token);
+    // TODO: all of this needs to be passed in
     var opts = {
-        name: "gofast-test",
+        name: name,
         region: "SFO1",
         size: "512mb",
         image: "ubuntu-14-04-x64",
@@ -295,30 +307,50 @@ GoFastServer.prototype._startWorkers = function() {
         ipv6: false,
         private_networking: false,
     };
-    client.droplets.create(opts, function(err, newServer) {
-        if (err) {
-            log.error(err);
-            throw new Error(err);
-        }
-        // log.info("SERVER INFO:", newServer);
-        log.debug("Waiting 60 seconds for worker to start...");
-        setTimeout(function() { // TODO: poll server status
-            client.droplets.get(newServer.id, function(err, server) {
-                if (err) {
-                    log.error(err);
-                    throw new Error(err);
-                }
 
-                // log.info("SERVER STATUS:", server);
-                if (server.status === "active") log.info("ACTIVE!");
-                else log.info("NOT ACTIVE :(");
-                log.info(server.networks.v4[0].ip_address);
-                self.workerSetup.call(self, server, function(err) {
+    return new Promise(function(resolve, reject) {
+        client.droplets.create(opts, function(err, newServer) {
+            if (err) {
+                log.error(err);
+                throw new Error(err);
+            }
+            // log.info("SERVER INFO:", newServer);
+            log.debug("Waiting 60 seconds for %s to start...", name);
+            setTimeout(function() { // TODO: poll server status
+                client.droplets.get(newServer.id, function(err, server) {
                     if (err) {
                         log.error(err);
                         throw new Error(err);
                     }
-                    self.workerStart.call(self, server, function(err) {
+
+                    // log.info("SERVER STATUS:", server);
+                    if (server.status === "active") log.info("ACTIVE!");
+                    else log.info("NOT ACTIVE :(");
+                    log.info(server.networks.v4[0].ip_address);
+                    resolve(server);
+                });
+            }, serverStartupDelay);
+        });
+    });
+};
+
+GoFastServer.prototype._startWorkers = function() {
+    var self = this;
+    var i;
+
+    log.info ("Starting %d workers...", this.workerConcurrency);
+    for (i = 1; i <= this.workerConcurrency; i++) {
+        self._startServer({
+                name: "gofast-worker",
+                number: 0
+            })
+            .then(function(server) {
+                self.workerSetup(server, function(err) {
+                    if (err) {
+                        log.error(err);
+                        throw new Error(err);
+                    }
+                    self.workerStart(server, function(err) {
                         if (err) {
                             log.error(err);
                             throw new Error(err);
@@ -326,8 +358,7 @@ GoFastServer.prototype._startWorkers = function() {
                     });
                 });
             });
-        }, 60000);
-    });
+    }
 
     /*
     // pkgcloud is broken -- ssh keys currently don't work on DigitalOcean
@@ -375,6 +406,7 @@ GoFastServer.prototype._startWorkers = function() {
 };
 
 GoFastServer.prototype.workerSetup = function(server, cb) {
+    var self = this;
     var localPackage = this.workerPackage;
     var remotePackage = this.workerPackage; // TODO: be nicer about where the files get stored
     log.debug("Doing upload");
@@ -391,11 +423,12 @@ GoFastServer.prototype.workerSetup = function(server, cb) {
             return self._sshExec(server, "curl -sL https://deb.nodesource.com/setup_4.x | sudo -E bash - && sudo apt-get install -y nodejs");
         })
         .then(function() {
-            return self._sshExec(server, "npm install " + package);
+            return self._sshExec(server, "npm install " + remotePackage);
         })
         .then(function() {
             // _sshExec node package args
             log.info("Setup done");
+            cb (null, server);
         })
         .catch(function(err) {
             log.error(err);
@@ -468,32 +501,66 @@ GoFastServer.prototype._sshExec = function(server, cmd) {
     });
 };
 
-GoFastServer.prototype._sshReverseTunnel = function(server) {
+GoFastServer.prototype._sshReverseTunnel = function() {
     var tunnel = require("reverse-tunnel-ssh");
     var pkFile = this.pkgcloudConfig.conn.pkFile;
+    var self = this;
+    var server;
 
-    return new Promise(function(resolve, reject) {
-        // TODO: create a new server
+    // start proxy server
+    return self._startServer({
+            name: "gofast-proxy"
+        })
+        .then(function(s) {
+            server = s;
+            // add "GatewayPorts yes" to "/etc/ssh/sshd_config" on remote server
+            // see also: http://askubuntu.com/questions/50064/reverse-port-tunnelling
+            return self._sshExec(server, 'echo "\nGatewayPorts yes\n" >> /etc/ssh/sshd_config');
+        })
+        .then(function() {
+            return self._sshExec(server, "sudo reload ssh");
+        })
+        .then(function() {
+            return new Promise(function(resolve, reject) {
+                //tunnel is a ssh2 clientConnection object 
+                tunnel({
+                        host: server.networks.v4[0].ip_address,
+                        username: 'root',
+                        dstHost: '0.0.0.0', // bind to all interfaces 
+                        dstPort: serverPort,
+                        privateKey: require('fs').readFileSync(pkFile),
+                        //srcHost: '127.0.0.1', // default 
+                        //srcPort: dstPort // default is the same as dstPort 
+                    }, function(err, clientConnection) {
+                        if (err) throw err;
+                        // log.info("tunnel got connection");
+                    })
+                    .on("ready", function() {
+                        log.info("Tunnel ready");
+                        resolve(server);
+                    })
+                    .on("continue", function() {
+                        log.info("Tunnel ready to continue");
+                    })
+                    .on("error", function(err) {
+                        log.error("Error connecting to tunnel");
+                        reject(err);
+                    })
+                    .on("close", function(err) {
+                        log.error("Tunnel closed");
+                        reject(err);
+                    })
+                    .on("end", function(err) {
+                        log.error("Tunnel ended");
+                        reject(err);
+                    });
+            });
 
-        // TODO: add "GatewayPorts yes" to "/etc/ssh/sshd_config" on remote server
-        // see also: http://askubuntu.com/questions/50064/reverse-port-tunnelling
-
-        //tunnel is a ssh2 clientConnection object 
-        tunnel({
-            host: '159.203.253.248',
-            username: 'root',
-            dstHost: '0.0.0.0', // bind to all interfaces 
-            dstPort: serverPort,
-            privateKey: require('fs').readFileSync(pkFile),
-            //srcHost: '127.0.0.1', // default 
-            //srcPort: dstPort // default is the same as dstPort 
-        }, function(err, clientConnection) {
-            if (err) throw err;
-            // log.info("tunnel got connection");
+        })
+        .catch(function(err) {
+            log.error(err);
+            cb(err);
         });
-
-        resolve(null);
-    });
 };
 
 GoFastServer.prototype.workerStart = function(server, cb) {
@@ -503,7 +570,18 @@ GoFastServer.prototype.workerStart = function(server, cb) {
 
     log.info("Starting worker %s...", ipAddress);
 
-    // TODO: sshexec npm install && npm start
+    // sshexec npm install && npm start
+    var cmdPath = "node_modules/" + this.workerModuleName;
+    var cmd = "cd " + cmdPath + " && " + util.format(npmStartCmd, serverIpAddress, serverPort);
+    log.info("Running start command on server:", cmd);
+    return self._sshExec(server, cmd)
+        .then(function() {
+            return cb(null, server);
+        })
+        .catch(function(err) {
+            log.error(err);
+            return cb(err);
+        });
 };
 
 /**

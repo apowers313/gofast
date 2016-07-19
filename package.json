@@ -1,6 +1,6 @@
 {
   "name": "gofast",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "A simple distributed computing manager for batch-based jobs",
   "main": "index.js",
   "scripts": {
@@ -12,6 +12,13 @@
     "digitalocean"
   ],
   "author": "Adam Powers <apowers@ato.ms>",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/apowers313/gofast"
+  },
+  "bugs": {
+    "url": "https://github.com/apowers313/gofast/issues"
+  },
   "license": "MIT",
   "devDependencies": {
     "chai": "^3.5.0",
@@ -22,6 +29,7 @@
     "bunyan": "^1.8.1",
     "bunyan-pretty": "0.0.1",
     "digitalocean": "^0.7.1",
+    "ip": "^1.1.3",
     "npm": "^3.10.5",
     "pkgcloud": "^1.3.0",
     "restify": "^4.1.1",
