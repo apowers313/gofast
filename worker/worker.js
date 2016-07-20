@@ -30,7 +30,7 @@ GoFastWorker.prototype.init = function() {
     this.jobServerPort = 8080;
     this.jobServerBaseUrl = "http://" + this.jobServer + ":" + this.jobServerPort;
 
-    this.logServer = "localhost";
+    this.logServer = serverIpArg;
     this.logServerPort = 8080;
     this.logServerUrl = "http://" + this.logServer + ":" + this.logServerPort + "/log";
 

@@ -485,7 +485,7 @@ GoFastServer.prototype._sshExec = function(server, cmd) {
         self._sshConnect(server, function(err, sshConn) {
             sshConn.exec(cmd, function(err, stream) {
                 if (err) throw err;
-                log.debug("RUNNING CMD: \"%s\" successful.", cmd);
+                log.debug("RUNNING CMD: \"%s\".", cmd);
                 stream.on('close', function(code, signal) {
                     log.trace('Stream :: close :: code: ' + code + ', signal: ' + signal);
                     // sshConn.end();
