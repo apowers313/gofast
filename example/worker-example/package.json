@@ -10,6 +10,6 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "gofast": "^0.0.4"
+    "gofast": "^0.0.5"
   }
 }

@@ -1,6 +1,6 @@
 {
   "name": "gofast",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "description": "A simple distributed computing manager for batch-based jobs",
   "main": "index.js",
   "scripts": {

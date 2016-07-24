@@ -11,6 +11,12 @@ function GoFastWorker(callbacks, options) {
 
     options = options || {};
     this.verbose = (options.verbose !== false);
+
+    this.restHeaders = {
+        'Accept': '*/*',
+        'User-Agent': 'GoFast Worker',
+        'Worker-Host': ip.address()
+    };
 }
 
 GoFastWorker.prototype.init = function() {
@@ -60,16 +66,20 @@ function BunyanRemoteLog(options, error) {
     }
 
     this.logServerUrl = options.serverUrl;
-    console.log ("Server URL:", options.serverUrl);
+    console.log("Server URL:", options.serverUrl);
 }
 
 BunyanRemoteLog.prototype.write = function(record) {
     var logServerUrl = this.logServerUrl;
 
-    console.log ("Log server url:", logServerUrl);
-    rest.postJson(logServerUrl, record)
+    console.log("Log server url:", logServerUrl);
+    rest.postJson(logServerUrl, {
+            data: record,
+            timeout: 30000,
+            headers: this.restHeaders,
+        })
         .on('error', function(err) {
-            console.log (err);
+            console.log(err);
         });
 };
 
@@ -112,7 +122,8 @@ GoFastWorker.prototype._getJob = function(next) {
     // return new Promise(function(resolve, reject) {
     // fetch job from server
     rest.get(jobServerBaseUrl + "/job", {
-            timeout: 30000
+            timeout: 30000,
+            headers: this.restHeaders,
         })
         .on("complete", function(data) {
             log.debug("Got job:", data);

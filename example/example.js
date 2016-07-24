@@ -35,7 +35,7 @@ var validCallbacks = {
 };
 
 var validOptions = {
-    concurrency: 1
+    concurrency: 2
 };
 
 var server = new GoFastServer(validWorkerConfig, validCodeConfig, validCallbacks, validOptions);
@@ -46,7 +46,7 @@ function getJob(done) {
     // console.log ("getJob");
     this.log.info ("getJob");
     i++;
-    if (i > 3) done (null);
+    if (i > 10) done (null);
     else done ("job " + i);
 }
 
