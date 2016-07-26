@@ -8,7 +8,7 @@ var log, server;
 // config
 var serverPort = 8080;
 var npmStartCmd = "npm start -- server:%s:%s";
-var serverStartupDelay = 60000;
+var serverStartupDelay = 65000;
 
 function GoFastServer(workerConfig, codeConfig, callbacks, options) {
     if (typeof workerConfig !== "object" || typeof codeConfig !== "object" || typeof callbacks !== "object") {
@@ -91,6 +91,8 @@ function GoFastServer(workerConfig, codeConfig, callbacks, options) {
     this.workerConcurrency = options.concurrency || 10;
     this.test = options.test;
     this.testVerbose = options.testVerbose;
+    // this.test = true;
+    // this.testVerbose = true;
 
     this.workerList = [];
 }
@@ -105,7 +107,9 @@ GoFastServer.prototype._doRawLog = function(str) {
             // console.log ("Got data: \"%s\"", str);
             try {
                 log._emit(JSON.parse(str));
-            } catch (err) {}
+            } catch (err) {
+                log.error (err);
+            }
         }
     }
 };
@@ -227,7 +231,7 @@ GoFastServer.prototype._commInit = function() {
     server.get("/job", this._restJob.bind(this));
 
     // /result for workers posting job results
-    server.post("/results", this._restResult.bind(this));
+    server.post("/result", this._restResult.bind(this));
 
     // start server
     server.listen(serverPort, function() { // TODO: use port: 0xFA57 ?
@@ -236,15 +240,16 @@ GoFastServer.prototype._commInit = function() {
 };
 
 GoFastServer.prototype._restLog = function(req, res, next) {
-    // log.debug ("\"" + req.body + "\"");
+    // log.debug ("Log Body: \"" + req.body + "\"");
     this._doRawLog(req.body);
+    res.json ({result: "ok"});
 };
 
 function _getReqIpAddress(req) {
     if (ip.isEqual("127.0.0.1", req.connection.remoteAddress)) {
         // return req.headers.host.split(":")[0];
-        log.debug ("Returning Worker-Host IP address:", req.headers["Worker-Host"]);
-        return req.headers["Worker-Host"];
+        log.debug("Returning X-Worker-Host IP address:", req.headers["x-worker-host"]);
+        return req.headers["x-worker-host"];
     } else {
         return req.connection.remoteAddress;
     }
@@ -252,29 +257,54 @@ function _getReqIpAddress(req) {
 
 GoFastServer.prototype._restJob = function(req, res, next) {
     var self = this;
+
     // TODO: getJob should handle returned values and promises too...
+
+    // get a job from the registered getJob() callback
     this.getJob(function(job) {
         res.json({
             job: job
         });
 
         log.debug("Job:", job);
-        if (job === null) {
+
+        // if we get a null job, we don't have more work and it's time to shut down the worker
+        if (job === null && !self.test) {
             log.debug("Shutting down worker:", _getReqIpAddress(req));
-            self.workerShutdown.call(self, _getReqIpAddress(req))
+            self.workerShutdown(_getReqIpAddress(req))
                 .then(function() {
                     log.info("Worker successfully shut down");
+                    res.json ({result: "ok"});
+                    return next();
                 })
                 .catch(function(err) {
                     log.error(err);
+                    res.json (err);
+                    return next(err);
                 });
         }
-        next();
     });
 };
 
 GoFastServer.prototype._restResult = function(req, res, next) {
-    log.info("worker result");
+    var self = this;
+    log.debug("Worker result:", req.body);
+
+    var result = req.body;
+
+    // try {
+        this.receiveResult(result, function(err, resp) {
+            log.debug("receiveResult done");
+            if (err) log.warn(err);
+            res.json(resp || {
+                result: "ok"
+            });
+            next();
+        });
+    // } catch (err) {
+    //     log.error(err);
+    //     next(err);
+    // }
 };
 
 GoFastServer.prototype.buildWorkerImage = function() {
@@ -458,22 +488,33 @@ GoFastServer.prototype.workerSetup = function(server, cb) {
 var sshClient = require("ssh2").Client;
 
 // var ipAddress = "159.203.246.158";
-GoFastServer.prototype._sshConnect = function(server, cb) {
+GoFastServer.prototype._sshConnect = function(server, cb, cnt) {
     var ipAddress = server.networks.v4[0].ip_address;
     var user = this.pkgcloudConfig.conn.user;
     var pkFile = this.pkgcloudConfig.conn.pkFile;
 
     log.debug("Doing SSH Connect...");
-    var sshConn = new sshClient();
-    sshConn.on("ready", function() {
-        log.debug("SSH Connection ready");
-        cb(null, sshConn);
-    }).connect({
-        host: ipAddress,
-        port: 22,
-        username: user,
-        privateKey: require('fs').readFileSync(pkFile)
-    });
+    try {
+        var sshConn = new sshClient();
+        sshConn.on("ready", function() {
+            log.debug("SSH Connection ready");
+            cb(null, sshConn);
+        }).connect({
+            host: ipAddress,
+            port: 22,
+            username: user,
+            privateKey: require('fs').readFileSync(pkFile)
+        });
+    } catch (err) {
+        log.warn(err);
+        log.warn("Retrying sshConnect...");
+        cnt = cnt || 6; // TODO: variable
+        cnt--;
+        setTimeout(function() {
+            _sshConnect(server, cb, cnt);
+        }, 5000); // TODO: variable
+
+    }
 };
 
 GoFastServer.prototype._sshUpload = function(server, localFile, remoteFile) {
@@ -503,7 +544,12 @@ GoFastServer.prototype._sshExec = function(server, cmd) {
     return new Promise(function(resolve, reject) {
         self._sshConnect(server, function(err, sshConn) {
             sshConn.exec(cmd, function(err, stream) {
-                if (err) throw err;
+                if (err) {
+                    log.error("Error Name:", err.name);
+                    log.error("Error Message:", err.message);
+                    log.error("Error Type:", err.type);
+                    throw err;
+                }
                 log.debug("RUNNING CMD: \"%s\".", cmd);
                 stream.on('close', function(code, signal) {
                     log.trace('Stream :: close :: code: ' + code + ', signal: ' + signal);
@@ -616,24 +662,23 @@ GoFastServer.prototype.workerStart = function(server, cb) {
  */
 GoFastServer.prototype.getJob = function(done) {
     // empty function, in case the callback isn't implemented
+    log.warn("Default getJob: consider implementing");
     done(null); // TODO: use promises instead?
 };
 
 GoFastServer.prototype.receiveResult = function(result, done) {
     // empty function, in case the callback isn't implemented
+    log.warn("Default receiveResult: consider implementing");
     done(null);
 };
 
-function _findWorkerByIp(workerList, ip) {
-    log.debug("Looking for worker:", ip);
-    log.debug("workerList:", workerList);
+function _findWorkerByIp(workerList, workerIp) {
+    var index;
     var ret = workerList.filter(function(server, idx, arr) {
-        log.debug("server.networks:", server.networks);
-        if (ip.isEqual(ip, server.networks.v4[0].ip_address))
-            return {
-                server: server,
-                idx: idx
-            };
+        if (ip.isEqual(workerIp, server.networks.v4[0].ip_address) && index === undefined) {
+            index = idx;
+            return true;
+        }
     });
     log.debug("ret:", ret);
 
@@ -646,37 +691,42 @@ function _findWorkerByIp(workerList, ip) {
     }
 
     log.debug("Found worker ID:", ret[0]);
-    return ret[0];
+    return {
+        worker: ret[0],
+        idx: index
+    };
 }
 
-GoFastServer.prototype.workerShutdown = function(ip) {
+GoFastServer.prototype.workerShutdown = function(workerIp) {
     var self = this;
+
+    if (typeof workerIp !== "string") {
+        log.error("workerIp not a string in workerShutdown:", workerIp);
+    }
 
     return new Promise(function(resolve, reject) {
 
-        log.info("Shutting down worker"); // TODO: worker
-        log.info("WorkerList:", this.workerList);
+        log.info("Shutting down worker:", workerIp); // TODO: worker
         // empty function, in case the callback isn't implemented
-        var ret = _findWorkerByIp(this.workerList, ip);
-        log.debug("Found worker:", ret);
+        var ret = _findWorkerByIp(self.workerList, workerIp);
         var worker = ret.worker;
         var idx = ret.idx;
         var digitalocean = require("digitalocean");
-        var client = digitalocean.client(this.pkgcloudConfig.client.token);
+        var client = digitalocean.client(self.pkgcloudConfig.client.token);
         log.info("Destroying worker:", worker.id);
-        client.droplets.destroy(worker.id, function(err) {
+        client.droplets.delete(worker.id, function(err) {
             if (err) {
                 log.error(err);
                 return reject(err);
             }
 
             // remove from workerList
-            self.workerList = self.workerList.splice(idx, 1);
+            self.workerList.splice(idx, 1);
             log.debug(self.workerList.length, "workers remaining");
             if (self.workerList.length === 0) {
                 // destroy proxy server and exit
                 log.info("All done, destroying proxy");
-                client.droplets.destroy(self.proxyServer.id, function(err) {
+                client.droplets.delete(self.proxyServer.id, function(err) {
                     if (err) {
                         log.error(err);
                         return reject(err);
