@@ -3,6 +3,7 @@ var bunyan = require("bunyan");
 var async = require("async");
 var ip = require("ip");
 var os = require("os");
+var fs = require ("fs");
 var log;
 
 function GoFastWorker(callbacks, options) {
@@ -15,7 +16,7 @@ function GoFastWorker(callbacks, options) {
     this.restHeaders = {
         'Accept': '*/*',
         'User-Agent': 'GoFast Worker',
-        'Worker-Host': ip.address()
+        'X-Worker-Host': ip.address()
     };
 }
 
@@ -73,11 +74,7 @@ BunyanRemoteLog.prototype.write = function(record) {
     var logServerUrl = this.logServerUrl;
 
     console.log("Log server url:", logServerUrl);
-    rest.postJson(logServerUrl, {
-            data: record,
-            timeout: 30000,
-            headers: this.restHeaders,
-        })
+    rest.postJson(logServerUrl, record)
         .on('error', function(err) {
             console.log(err);
         });
@@ -110,7 +107,7 @@ GoFastWorker.prototype._logInit = function() {
         hostname: os.hostname() + " (" + ip.address() + ")",
         streams: streams
     });
-    log.info("Logging initialized.");
+    log.info("Worker logging initialized.");
 };
 
 GoFastWorker.prototype._getJob = function(next) {
@@ -144,14 +141,45 @@ GoFastWorker.prototype._getJob = function(next) {
             });
         })
         .on("timeout", function(ms) {
-            log.error("request timed out");
+            log.error("Request timed out while getting job");
+        })
+        .on("error", function(err) {
+            log.error("Error while getting job:", err);
         });
     // });
 };
 
 GoFastWorker.prototype._saveResult = function(result, done) {
-    log.debug("Saving result");
-    setTimeout(done, 2000);
+    var fileSz;
+    var jobServerBaseUrl = this.jobServerBaseUrl;
+    log.info("Saving result:", result);
+
+    if (result === undefined || result === null) {
+        log.warn ("Job had empty result in _saveResult");
+        return;
+    }
+    if (typeof result.filepath === "string") {
+        fileSz = fs.statSync (result.filepath);
+        result.file = rest.file (result.filepath, null, fileSz, null, null);
+    }
+
+    rest.post (jobServerBaseUrl + "/result", {
+            data: result,
+            timeout: 30000,
+            headers: this.restHeaders,
+        })
+        .on("complete", function(data) {
+            log.info("Success saving results");
+            done(null);
+        })
+        .on("timeout", function(ms) {
+            log.error("Request timed out while saving results");
+            done(ms);
+        })
+        .on("error", function(err) {
+            log.error("Error while saving results:", err);
+            done(err);
+        });
 };
 
 module.exports = GoFastWorker;
