@@ -44,12 +44,14 @@ server.init();
 var i = 0;
 function getJob(done) {
     // console.log ("getJob");
-    this.log.info ("getJob");
+    this.log.info ("Server: Dishing up a Job");
     i++;
     if (i > 10) done (null);
     else done ("job " + i);
 }
 
-function receiveResult(result) {
+function receiveResult(result, done) {
+    this.log.info ("Server: Got a result:", result);
+    done (null);
     // console.log ("receiveResult");
 }
