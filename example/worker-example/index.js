@@ -12,6 +12,9 @@ function doJob(job, done) {
     log = this.log; // running in the context of the GoFastWorker
     log.info ("Doing job", job);
     // ... do stuff here ...
-    done (null, "Okay!");
+    setTimeout (function () {
+        log.info ("Posting result");
+        done (null, "Okay!");
+    }, 2000);
 }
 
