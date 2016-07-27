@@ -8,8 +8,19 @@ Initial commit. Do not use.
 `npm install gofast`
 
 ## Configuration Options
-### Worker Config
-### Worker Setup
+### Worker Definition
+api
+server
+config
+### Package Config
 ### GoFast Options
+proxy
+logfile
+concurrency
+test
+testVerbose
 
 ## Example
+``` js
+
+```
