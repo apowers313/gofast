@@ -2,3 +2,5 @@ node_modules
 **/*.log
 **/*.tgz
 **/npm-debug.log*
+**/upload_*
+**/.DS_Store
