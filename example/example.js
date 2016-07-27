@@ -1,57 +1,62 @@
 var gofast = require("../index.js");
 var GoFastServer = gofast.Server;
 
-var validWorkerConfig = {
-    client: {
+var workerConfig = {
+    api: {
         provider: "digitalocean",
         token: "DEADBEEF0BADCODE"
     },
     server: {
-        name: 'gofast-test',
-        flavor: '512mb',
-        image: 'ubuntu-14-04-x64',
         region: "SFO1",
-        // keynames: ["RSA Key"],
-        // keyname: ["RSA Key"]
-        // ssh_keys: [
-        // "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDM+7sZrv+qe3nKqYbIqKC8FeW98cWLodU6lzMlV7Qw3DKrzcewZkzQVh5184i7u2+Bj1TN0mkTec4GgP9HsZaOGsxyiLupYLwP6kTmJDyKZKp63cWygkChQoHmz8ZwaDcFD4veJcs/9PWwx10b/Lmr4MDQk7d/7FZmo3XPXsATA29KpjNnf/92d8WbO7biPDbpLIIOkwUeDxsqjct89q674FcXl6e1QKPyHBK6TibLeOV0EUw1i5kytE7iuQCITZ3lP/A8t1Bzcu1oYmpu9m3Joyxef42bRMfcYbtfUrZM+kimjdGAR9OiYnvblvusWBEnS9kKhjS1LDNgNlrH+4wH apowers@Werky.local",
-        // "RSA Key"
-        // ]
+        size: "512mb",
+        image: "ubuntu-14-04-x64",
+        // ssh_keys: ["RSA Key"],
+        ssh_keys: ["a7:f9:cb:48:e3:97:39:4c:9b:e7:d9:57:9e:7d:17:96"], // ssh-keygen -l -E md5 -f ~/.ssh/id_rsa.pub
+        backups: false,
+        ipv6: false,
+        private_networking: false,
     },
-    conn: {
+    config: {
         user: "root",
-        pkFile: "/Users/apowers/.ssh/id_rsa"
+        pkFile: "/Users/apowers/.ssh/id_rsa",
+        setupCmds: [{
+            function: "sshExec",
+            args: ["apt-get update"]
+        }, {
+            function: "sshExec",
+            args: ["curl -sL https://deb.nodesource.com/setup_4.x | sudo -E bash - && sudo apt-get install -y nodejs"]
+        }],
     }
-    
 };
 
-var validCodeConfig = {
+var projectConfig = {
     path: "./worker-example"
 };
 
-var validCallbacks = {
+var callbacks = {
     getJob: getJob,
     receiveResult: receiveResult,
 };
 
-var validOptions = {
+var options = {
     concurrency: 2
 };
 
-var server = new GoFastServer(validWorkerConfig, validCodeConfig, validCallbacks, validOptions);
+var server = new GoFastServer(workerConfig, projectConfig, callbacks, options);
 server.init();
 
 var i = 0;
+
 function getJob(done) {
     // console.log ("getJob");
-    this.log.info ("Server: Dishing up a Job");
+    this.log.info("Server: Dishing up a Job");
     i++;
-    if (i > 10) done (null);
-    else done ("job " + i);
+    if (i > 10) done(null);
+    else done("job " + i);
 }
 
 function receiveResult(result, done) {
-    this.log.info ("Server: Got a result:", result);
-    done (null);
+    this.log.info("Server: Got a result:", result);
+    done(null);
     // console.log ("receiveResult");
 }
