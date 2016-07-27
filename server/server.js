@@ -10,51 +10,66 @@ var serverPort = 8080;
 var npmStartCmd = "npm start -- server:%s:%s";
 var serverStartupDelay = 65000;
 
-function GoFastServer(workerConfig, codeConfig, callbacks, options) {
-    if (typeof workerConfig !== "object" || typeof codeConfig !== "object" || typeof callbacks !== "object") {
-        throw new Error("new GoFastServer requires workerConfig, codeConfig, and callbacks objects as parameters");
+function GoFastServer(workerConfig, projectConfig, callbacks, options) {
+    var self = this;
+
+    if (typeof workerConfig !== "object" || typeof projectConfig !== "object" || typeof callbacks !== "object") {
+        throw new Error("new GoFastServer requires workerConfig, projectConfig, and callbacks objects as parameters");
     }
 
     /* 
     workerConfig:
-        client:
+        api:
             provider: string, "digitalocean"; see pkgcloud docs
             token: string, key for service API management
         server:
             image: string, what image to use for the server (e.g. - Ubuntu, CoreOS)
-        conn:
+        config:
             user: string, the user to use for ssh (default: root)
             pkFile: string, path to the private key file (default: ~/.ssh/id_rsa)
     */
     if (typeof workerConfig !== "object" ||
-        typeof workerConfig.client !== "object" ||
-        typeof workerConfig.client.provider !== "string" ||
-        typeof workerConfig.server.flavor !== "string" ||
+        typeof workerConfig.api !== "object" ||
+        typeof workerConfig.api.provider !== "string" ||
+        typeof workerConfig.server.region !== "string" ||
+        typeof workerConfig.server.size !== "string" ||
+        typeof workerConfig.server.ssh_keys !== "object" ||
         typeof workerConfig.server.image !== "string" ||
-        typeof workerConfig.server.region !== "string") {
+        typeof workerConfig.config.user !== "string" ||
+        typeof workerConfig.config.pkFile !== "string" ||
+        typeof workerConfig.config.setupCmds !== "object") {
         throw new Error("bad workerConfig object, should be a proper pkgcloud config object");
     }
 
-    this.pkgcloudConfig = workerConfig;
+    // prefer the API token from the environment, if it exists
+    this.workerConfig = workerConfig;
     this.token = process.env.GOFAST_TOKEN || workerConfig.token;
     if (typeof this.token !== "string") {
         throw new Error("need API key for starting workers");
     }
-    this.pkgcloudConfig = workerConfig;
-    this.pkgcloudConfig.client.token = this.token;
+    this.workerConfig.api.token = this.token;
 
-    // if (typeof workerConfig.provider !== "string" && typeof workerConfig.provider !== "undefined") {
-    //     throw new Error ("expected workerConfig.provider to be the number of workers to start");
-    // }
+    // convert any function strings to functions
+    this.workerConfig.config.setupCmds = this.workerConfig.config.setupCmds.map(function(cmd) {
+        if (typeof cmd.function === "string") {
+            switch (cmd.function) {
+                case "sshExec":
+                    cmd.function = self._sshExec;
+                    return cmd;
+                default:
+                    throw new Error("Unknown string for function:", cmd.function);
+            }
+        }
+    });
 
     /*
-    codeConfig:
+    projectConfig:
         path: folder of the worker npm project
     */
-    if (typeof codeConfig.path !== "string") {
-        throw new Error("expected codeConfig.path to be a string that points to the directory of the worker npm project");
+    if (typeof projectConfig.path !== "string") {
+        throw new Error("expected projectConfig.path to be a string that points to the directory of the worker npm project");
     }
-    this.workerProjectPath = codeConfig.path;
+    this.workerProjectPath = projectConfig.path;
 
     /*
     callbacks:
@@ -92,7 +107,6 @@ function GoFastServer(workerConfig, codeConfig, callbacks, options) {
     this.test = options.test;
     this.testVerbose = options.testVerbose;
     // this.test = true;
-    // this.testVerbose = true;
 
     this.workerList = [];
 }
@@ -108,7 +122,7 @@ GoFastServer.prototype._doRawLog = function(str) {
             try {
                 log._emit(JSON.parse(str));
             } catch (err) {
-                log.error (err);
+                log.error(err);
             }
         }
     }
@@ -220,7 +234,12 @@ GoFastServer.prototype._commInit = function() {
     });
     server.use(restify.acceptParser(server.acceptable));
     server.use(restify.queryParser());
-    server.use(restify.bodyParser());
+    server.use(restify.bodyParser({
+        // mapParams: true,
+        mapFiles: true,
+        keepExtensions: true,
+        uploadDir: "."
+    }));
     server.use(restify.requestLogger());
 
     // create REST endpoints
@@ -242,7 +261,9 @@ GoFastServer.prototype._commInit = function() {
 GoFastServer.prototype._restLog = function(req, res, next) {
     // log.debug ("Log Body: \"" + req.body + "\"");
     this._doRawLog(req.body);
-    res.json ({result: "ok"});
+    res.json({
+        result: "ok"
+    });
 };
 
 function _getReqIpAddress(req) {
@@ -274,12 +295,10 @@ GoFastServer.prototype._restJob = function(req, res, next) {
             self.workerShutdown(_getReqIpAddress(req))
                 .then(function() {
                     log.info("Worker successfully shut down");
-                    res.json ({result: "ok"});
                     return next();
                 })
                 .catch(function(err) {
                     log.error(err);
-                    res.json (err);
                     return next(err);
                 });
         }
@@ -288,19 +307,17 @@ GoFastServer.prototype._restJob = function(req, res, next) {
 
 GoFastServer.prototype._restResult = function(req, res, next) {
     var self = this;
-    log.debug("Worker result:", req.body);
-
     var result = req.body;
 
     // try {
-        this.receiveResult(result, function(err, resp) {
-            log.debug("receiveResult done");
-            if (err) log.warn(err);
-            res.json(resp || {
-                result: "ok"
-            });
-            next();
+    this.receiveResult(result, function(err, resp) {
+        log.debug("receiveResult done");
+        if (err) log.warn(err);
+        res.json(resp || {
+            result: "ok"
         });
+        next();
+    });
     // } catch (err) {
     //     log.error(err);
     //     next(err);
@@ -343,19 +360,9 @@ GoFastServer.prototype._startServer = function(options) {
     var number = options.number;
     if (typeof number === "number") name = name + ('000' + number).slice(-3);
     var digitalocean = require("digitalocean");
-    var client = digitalocean.client(this.pkgcloudConfig.client.token);
-    // TODO: all of this needs to be passed in
-    var opts = {
-        name: name,
-        region: "SFO1",
-        size: "512mb",
-        image: "ubuntu-14-04-x64",
-        // ssh_keys: ["RSA Key"],
-        ssh_keys: ["a7:f9:cb:48:e3:97:39:4c:9b:e7:d9:57:9e:7d:17:96"], // ssh-keygen -l -E md5 -f ~/.ssh/id_rsa.pub
-        backups: false,
-        ipv6: false,
-        private_networking: false,
-    };
+    var client = digitalocean.client(this.workerConfig.api.token);
+    var opts = JSON.parse(JSON.stringify(this.workerConfig.server)); // cheap object copy
+    opts.name = name;
 
     return new Promise(function(resolve, reject) {
         client.droplets.create(opts, function(err, newServer) {
@@ -388,10 +395,10 @@ GoFastServer.prototype._startServer = function(options) {
     var pkgcloud = require("pkgcloud");
 
     // pkgcloud init
-    log.info("pkg cloud client:", this.pkgcloudConfig.client);
+    log.info("pkg cloud client:", this.workerConfig.client);
 
     // setup API client
-    var client = pkgcloud.compute.createClient(this.pkgcloudConfig.client);
+    var client = pkgcloud.compute.createClient(this.workerConfig.client);
 
     client.listKeys (function (err, keys) {
         if (err) log.error (err);
@@ -399,8 +406,8 @@ GoFastServer.prototype._startServer = function(options) {
     });
 
     // create server
-    this.pkgcloudConfig.server.name = "gofast-test"; // TODO
-    client.createServer(this.pkgcloudConfig.server, function(err, server) {
+    this.workerConfig.server.name = "gofast-test"; // TODO
+    client.createServer(this.workerConfig.server, function(err, server) {
         if (err) {
             log.error(err);
         } else {
@@ -454,6 +461,21 @@ GoFastServer.prototype._startWorkers = function() {
     }
 };
 
+GoFastServer.prototype._promiseSequence = function(t, server, cmds) {
+    var self = this;
+    var p = Promise.resolve();
+
+    cmds.forEach(function(cmd) {
+        p = p.then(function() {
+            var args = cmd.args.slice(0);
+            args.unshift(server);
+            return cmd.function.apply(self, args);
+        });
+    });
+
+    return p;
+};
+
 GoFastServer.prototype.workerSetup = function(server, cb) {
     var self = this;
     var localPackage = this.workerPackage;
@@ -466,10 +488,7 @@ GoFastServer.prototype.workerSetup = function(server, cb) {
         // })
         // TODO: set this up as an array that's passed in as an option and loop through the commands in the array
         .then(function() {
-            return self._sshExec(server, "apt-get update");
-        })
-        .then(function() {
-            return self._sshExec(server, "curl -sL https://deb.nodesource.com/setup_4.x | sudo -E bash - && sudo apt-get install -y nodejs");
+            return self._promiseSequence(this, server, self.workerConfig.config.setupCmds);
         })
         .then(function() {
             return self._sshExec(server, "npm install " + remotePackage);
@@ -490,8 +509,8 @@ var sshClient = require("ssh2").Client;
 // var ipAddress = "159.203.246.158";
 GoFastServer.prototype._sshConnect = function(server, cb, cnt) {
     var ipAddress = server.networks.v4[0].ip_address;
-    var user = this.pkgcloudConfig.conn.user;
-    var pkFile = this.pkgcloudConfig.conn.pkFile;
+    var user = this.workerConfig.config.user;
+    var pkFile = this.workerConfig.config.pkFile;
 
     log.debug("Doing SSH Connect...");
     try {
@@ -520,7 +539,7 @@ GoFastServer.prototype._sshConnect = function(server, cb, cnt) {
 GoFastServer.prototype._sshUpload = function(server, localFile, remoteFile) {
     var self = this;
     var ipAddress = server.networks.v4[0].ip_address;
-    var user = this.pkgcloudConfig.conn.user;
+    var user = this.workerConfig.config.user;
 
     return new Promise(function(resolve, reject) {
         log.info(`Copying ${localFile} to ${user}@${ipAddress}:${remoteFile}`);
@@ -568,7 +587,7 @@ GoFastServer.prototype._sshExec = function(server, cmd) {
 
 GoFastServer.prototype._sshReverseTunnel = function() {
     var tunnel = require("reverse-tunnel-ssh");
-    var pkFile = this.pkgcloudConfig.conn.pkFile;
+    var pkFile = this.workerConfig.config.pkFile;
     var self = this;
     var server;
 
@@ -642,7 +661,6 @@ GoFastServer.prototype.workerStart = function(server, cb) {
 
     log.debug("Adding worker to list");
     self.workerList.push(server);
-    log.debug("Worker list is now:", self.workerList);
     log.debug("Worker list is %d long", self.workerList.length);
 
     return self._sshExec(server, cmd)
@@ -680,7 +698,6 @@ function _findWorkerByIp(workerList, workerIp) {
             return true;
         }
     });
-    log.debug("ret:", ret);
 
     if (ret.length < 1) {
         log.warn("Trying to find worker by IP: no workers found");
@@ -690,7 +707,7 @@ function _findWorkerByIp(workerList, workerIp) {
         log.warn("Trying to find worker by IP: multiple workers found");
     }
 
-    log.debug("Found worker ID:", ret[0]);
+    // log.debug("Found worker ID:", ret[0]);
     return {
         worker: ret[0],
         idx: index
@@ -712,7 +729,7 @@ GoFastServer.prototype.workerShutdown = function(workerIp) {
         var worker = ret.worker;
         var idx = ret.idx;
         var digitalocean = require("digitalocean");
-        var client = digitalocean.client(self.pkgcloudConfig.client.token);
+        var client = digitalocean.client(self.workerConfig.api.token);
         log.info("Destroying worker:", worker.id);
         client.droplets.delete(worker.id, function(err) {
             if (err) {
