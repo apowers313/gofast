@@ -14,7 +14,8 @@ function doJob(job, done) {
     // ... do stuff here ...
     setTimeout (function () {
         log.info ("Posting result");
-        done (null, "Okay!");
+        // done (null, "Okay!");
+        done (null, {filepath: "./kittens.jpg"});
     }, 2000);
 }
 
