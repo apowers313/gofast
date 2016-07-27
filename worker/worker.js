@@ -150,7 +150,7 @@ GoFastWorker.prototype._getJob = function(next) {
 };
 
 GoFastWorker.prototype._saveResult = function(result, done) {
-    var fileSz;
+    var fileSz, useMultipart = false;
     var jobServerBaseUrl = this.jobServerBaseUrl;
     log.info("Saving result:", result);
 
@@ -158,18 +158,29 @@ GoFastWorker.prototype._saveResult = function(result, done) {
         log.warn ("Job had empty result in _saveResult");
         return;
     }
-    if (typeof result.filepath === "string") {
-        fileSz = fs.statSync (result.filepath);
-        result.file = rest.file (result.filepath, null, fileSz, null, null);
-    }
 
+    // if (typeof result.filepath === "string") {
+    //     fileSz = fs.statSync (result.filepath);
+    //     log.info ("Saving file:", fileSz.size);
+    //     result = rest.file (result.filepath, null, fileSz.size, null, null);
+    //     useMultipart = true;
+    // } else {
+    //     result = {result: result};
+    // }
+
+    log.info (rest.file (file, "kittens.jpg", 29227, null, "image/jpeg"));
+    log.info ("Multipart:", useMultipart);
+
+    var file = "./kittens.jpg";
+    log.info ("uploading %s...", file);
     rest.post (jobServerBaseUrl + "/result", {
-            data: result,
-            timeout: 30000,
-            headers: this.restHeaders,
+            multipart: true,
+            data: {file: rest.file (file, "kittens.jpg", 29227, null, "image/jpeg")},
+            // timeout: 30000,
+            // headers: this.restHeaders,
         })
         .on("complete", function(data) {
-            log.info("Success saving results");
+            log.debug("Success saving results");
             done(null);
         })
         .on("timeout", function(ms) {
@@ -180,6 +191,24 @@ GoFastWorker.prototype._saveResult = function(result, done) {
             log.error("Error while saving results:", err);
             done(err);
         });
+    // rest.post (jobServerBaseUrl + "/result", {
+    //         multipart: useMultipart,
+    //         data: result,
+    //         timeout: 30000,
+    //         headers: this.restHeaders,
+    //     })
+    //     .on("complete", function(data) {
+    //         log.debug("Success saving results");
+    //         done(null);
+    //     })
+    //     .on("timeout", function(ms) {
+    //         log.error("Request timed out while saving results");
+    //         done(ms);
+    //     })
+    //     .on("error", function(err) {
+    //         log.error("Error while saving results:", err);
+    //         done(err);
+    //     });
 };
 
 module.exports = GoFastWorker;
